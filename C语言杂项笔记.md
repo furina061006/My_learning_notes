@@ -24,6 +24,10 @@
     - [`&`(按位与)](#按位与)
     - [`^`(按位异或)](#按位异或)
     - [没时间写了😵,先写一下常见位运算的概况](#没时间写了先写一下常见位运算的概况)
+  - [4、规范函数库的写法](#4规范函数库的写法)
+    - [一个函数的完整写法](#一个函数的完整写法)
+      - [注释](#注释)
+      - [函数定义与实现](#函数定义与实现)
 ##  1. #define（宏预处理） 的作用
 ***C 语言编译的第一步是预处理（由预处理器 cpp 完成），它会处理所有以 # 开头的指令***
 #### 一、定义常量（最常见）:
@@ -273,3 +277,90 @@ C语言有6种基本的位运算符，如下表所示：
 | `<<`   | 左移     | 将二进位向左移动，低位补0                              |
 | `>>`   | 右移     | 将二进位向右移动，高位补符号位（有符号数）或0（无符号数） |
 
+## 4、规范函数库的写法
+### 一个函数的完整写法
+```c
+/**
+  * @brief  Enables or disables the AHB peripheral clock.
+  * @param  RCC_AHBPeriph: specifies the AHB peripheral to gates its clock.
+  *   
+  *   For @b STM32_Connectivity_line_devices, this parameter can be any combination
+  *   of the following values:        
+  *     @arg RCC_AHBPeriph_DMA1
+  *     @arg RCC_AHBPeriph_DMA2
+  *     @arg RCC_AHBPeriph_SRAM
+  *     @arg RCC_AHBPeriph_FLITF
+  *     @arg RCC_AHBPeriph_CRC
+  *     @arg RCC_AHBPeriph_OTG_FS    
+  *     @arg RCC_AHBPeriph_ETH_MAC   
+  *     @arg RCC_AHBPeriph_ETH_MAC_Tx
+  *     @arg RCC_AHBPeriph_ETH_MAC_Rx
+  * 
+  *   For @b other_STM32_devices, this parameter can be any combination of the 
+  *   following values:        
+  *     @arg RCC_AHBPeriph_DMA1
+  *     @arg RCC_AHBPeriph_DMA2
+  *     @arg RCC_AHBPeriph_SRAM
+  *     @arg RCC_AHBPeriph_FLITF
+  *     @arg RCC_AHBPeriph_CRC
+  *     @arg RCC_AHBPeriph_FSMC
+  *     @arg RCC_AHBPeriph_SDIO
+  *   
+  * @note SRAM and FLITF clock can be disabled only during sleep mode.
+  * @param  NewState: new state of the specified peripheral clock.
+  *   This parameter can be: ENABLE or DISABLE.
+  * @retval None
+  */
+void RCC_AHBPeriphClockCmd(uint32_t RCC_AHBPeriph, FunctionalState NewState)
+{
+  /* Check the parameters */
+  assert_param(IS_RCC_AHB_PERIPH(RCC_AHBPeriph));
+  assert_param(IS_FUNCTIONAL_STATE(NewState));
+
+  if (NewState != DISABLE)
+  {
+    RCC->AHBENR |= RCC_AHBPeriph;
+  }
+  else
+  {
+    RCC->AHBENR &= ~RCC_AHBPeriph;
+  }
+}
+```
+#### 注释
+```C
+/**
+  *
+  *
+  */
+```
+每行前边都有一个`*`,来表示这行是注释
+
+---
+注释内的内容分为
+- 简要描述`@brief`
+- 参数含义`@param`
+- 参数具体取值`@arg`
+- 注意事项`@note`
+- 返回值的具体含义`@retval`
+
+一般是这几个部分组成,具体情况可以看`@`,即`Doxygen`风格的文档注释标签来分析, 以下是一些常见的`Doxygen`风格标签:
+| 标签 | 用途 | 示例 |
+|------|:------:|------|
+| `@brief` | 简要描述函数/结构体/宏的作用（必写） | `@brief Initializes the GPIO peripheral.` |
+| `@param` | 描述函数参数的含义 | `@param GPIOx: where x can be (A..K) to select the GPIO peripheral.` |
+| `@arg` | 列出某个参数允许的具体取值（常用于枚举或宏定义） | `@arg GPIO_PIN_0: Pin 0 selected`<br>`@arg GPIO_PIN_1: Pin 1 selected` |
+| `@note` | 注意事项、限制条件、副作用等 | `@note This function must be called before using GPIO.` |
+| `@retval` | 描述返回值的具体含义（尤其用于返回状态码） | `@retval HAL_OK: Operation is OK`<br>`@retval HAL_ERROR: Error occurred` |
+| `@return` | 通用返回值说明（和 `@retval` 类似，但更笼统） | `@return None`（用于 void 函数） |
+|`@class / @namespace`|类/命名空间||
+|`@exception / @throw`|异常||
+|`@overload`|函数重载||
+|`@template`|模板||
+| `@see` | 参考其他函数或文档 | `@see GPIO_Init()` |
+| `@code{.c} ... @endcode` | 插入示例代码块 | 用于展示用法 |
+| `@defgroup` / `@addtogroup` | 分组管理（大型库如 HAL 会用） | 组织模块化文档 |
+| `@author` / `@date` | 作者和日期（部分项目保留） | 多见于内核或老代码 |
+|`@ref`|使后面的标识符转为链接，点它可以跳转到相关详细说明|创建内部交叉引用链接|
+#### 函数定义与实现
+对每一模块的功能都进行注释解明.
