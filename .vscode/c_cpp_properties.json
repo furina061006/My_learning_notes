@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "D:/VScode-tools/x86_64-15.2.0-release-posix-seh-msvcrt-rt_v13-rev0/mingw64/x86_64-w64-mingw32/include/**",
+                "D:/VScode-tools/x86_64-15.2.0-release-posix-seh-msvcrt-rt_v13-rev0/mingw64/include/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "compilerPath": "D:/VScode-tools/x86_64-15.2.0-release-posix-seh-msvcrt-rt_v13-rev0/mingw64/bin/g++.exe",
+            "compilerArgs": [
+                "\"-std=c++17\"",
+                "\"-Wall\"",
+                "\"-g\"",
+                "\"-m64\""
+            ]
+        }
+    ],
+    "version": 4
+}
