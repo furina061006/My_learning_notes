@@ -13,8 +13,8 @@ int main(void) {
     printf("%d\n",sizeof(abc.x));
     Print();
 
-    // efg.x = 1;
-    // printf("%d\n",efg.x); 
+    efg.x = 1;
+    printf("%d\n",efg.x); 
 
     return 0;
 }
