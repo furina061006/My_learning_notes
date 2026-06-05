@@ -66,3 +66,41 @@ Claude Code 的自定义 slash command skill 必须放在**项目根目录的 `.
 printf "refs/heads/main <sha> refs/heads/main <sha>" | bash .git/hooks/pre-push
 echo "EXIT CODE: $?"  # 0=放行, 1=拦截
 ```
+
+---
+
+## 2026-06-06 — Git 工作流规则：保护目录必须分开 commit
+
+### 规则（以后 AI 自动执行）
+当需要同时修改**受保护目录**和**普通目录**时，必须拆分成两个 commit：
+
+**Step 1** — 暂存并提交普通文件（笔记、NEUP 等）：
+```bash
+git add C语言杂项笔记.md NEUP/  # 等普通文件
+git commit -m "update: xxx"
+git push                            # ✅ 放行
+```
+
+**Step 2** — 暂存并提交保护目录（仅本地）：
+```bash
+git add .claude/ note-taking_copilot/
+git commit -m "update: xxx"
+git push                            # ❌ hook 拦截，留在本地
+```
+
+### 受保护目录列表
+| 目录 | 原因 |
+|------|------|
+| `.claude/` | Claude Code 技能和配置 |
+| `note-taking_copilot/` | AI 协作配置和 skill 文档 |
+
+### 如果搞混了怎么办
+如果不小心合在了一个 commit 里且还没 push：
+```bash
+git reset --soft HEAD~1                # 撤销 commit，改动保留在 stage
+git restore --staged .claude/ note-taking_copilot/  # 取出保护目录
+git commit -m "普通改动"                # 先提交普通文件
+git push
+git add .claude/ note-taking_copilot/
+git commit -m "本地改动"                # 再提交本地文件
+```
