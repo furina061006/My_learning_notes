@@ -44,7 +44,7 @@ example1:
 	; 描述完毕
 
 	.seh_proc	_Z12SendPasswordPPc;函数开启标志,给操作系统看的, 让windows知道函数哪里开始, 然后如果函数奔溃, win可以正确打印栈堆,.seh_都是这个作用
-_Z12SendPasswordPPc:
+_Z12SendPasswordPPc:;.text + 0x100 + 0x2FF
 .LFB86:;函数栈帧开始的位置标记, 告诉调试器,这个函数栈帧的开始
 	pushq	%rbp;将基址指针压入栈,这是为了保存调用者的栈帧状态。
 	.seh_pushreg	%rbp

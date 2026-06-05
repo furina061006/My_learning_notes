@@ -8,7 +8,6 @@ const char* answer = "Ciallo";
 struct example{
     char b;
     int a;
-   
 }example1;
 
 void SendPassword(char **ptarget) {
@@ -20,4 +19,4 @@ void SendPassword(char **ptarget) {
         (*ptarget)[i] = password[i];
     }
     (*ptarget)[i] = '\0';
-} 
+}  
