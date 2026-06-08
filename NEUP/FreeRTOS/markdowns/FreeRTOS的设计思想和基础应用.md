@@ -48,6 +48,22 @@
     - [5.1 完整执行流](#51-完整执行流)
     - [5.2 main() 里面发生了什么](#52-main-里面发生了什么)
     - [5.3 vTaskStartScheduler() 之后的世界](#53-vtaskstartscheduler-之后的世界)
+  - [6. 应用 Demo：ESP32-S3 颜色巡线](#6-应用-demoesp32-s3-颜色巡线)
+    - [项目结构](#项目结构)
+    - [里面用了哪些 FreeRTOS 机制？](#里面用了哪些-freertos-机制)
+    - [每个模块在做什么](#每个模块在做什么)
+      - [📷 Camera 模块（`camera_setting.c`）—— 拍照工](#-camera-模块camera_settingc-拍照工)
+      - [🎨 Color Detection 模块（`color_detection.cpp`）—— 识别工](#-color-detection-模块color_detectioncpp-识别工)
+        - [Step 1 — 等帧](#step-1--等帧)
+        - [Step 2 — 图像分割](#step-2--图像分割)
+        - [Step 3 — 颜色检测](#step-3--颜色检测)
+        - [Step 4 — 提取最大色块](#step-4--提取最大色块)
+        - [Step 5 — 发结果](#step-5--发结果)
+      - [🔌 I2C Send 模块（`iic_data_send.cpp`）—— 通信工](#-i2c-send-模块iic_data_sendcpp-通信工)
+        - [任务在做什么？](#任务在做什么)
+        - [两个回调函数](#两个回调函数)
+      - [双核调度 —— FreeRTOS 支持多核](#双核调度--freertos-支持多核)
+  - [写在最后](#写在最后)
   - [写在最后](#写在最后)
 
 ---
@@ -645,10 +661,332 @@ main()
 
 ---
 
+## 6. 应用 Demo：ESP32-S3 颜色巡线
+
+理论说了这么多，来看看一个真实的项目——**ESP32-S3 颜色巡线**：
+~（整体的框架我是直接搬的官方给的例程，但这个例程内部好像有挺多毛病的，比如颜色阈值不对，漏分析区域等等，还有挺多还待发现，改了一些，还有些还没改）~
+
+### 项目结构
+
+```
+摄像头拍照  →  颜色检测  →  I2C 发送给下位机
+  (Task 1)      (Task 2)       (Task 3)
+```
+
+三个 FreeRTOS 任务通过两个队列串联成一条**流水线**：
+
+```c
+void setup() {
+    // 创建两个队列
+    xQueueAIFrame  = xQueueCreate(2, sizeof(camera_fb_t *));
+    xQueueIICData  = xQueueCreate(2, sizeof(send_color_data_t));
+
+    // 注册三个任务
+    register_camera(PIXFORMAT_RGB565, FRAMESIZE_QQVGA, 4, xQueueAIFrame);
+    register_color_detection(xQueueAIFrame, NULL, xQueueIICData, NULL, true);
+    register_iic_data_send(xQueueIICData, NULL);
+}
+```
+
+| 任务 | 文件 | 功能 | 队列 |
+|------|------|------|------|
+| 📷 Camera | `camera_setting.c` | 摄像头拍照，把帧发到队列 | `xQueueAIFrame` |
+| 🎨 Color Detection | `color_detection.cpp` | 从队列取帧，做颜色识别，结果发到下一个队列 | `xQueueIICData` |
+| 🔌 I2C Send | `iic_data_send.cpp` | 从队列取颜色数据，通过 I2C 发给下位机 | — |
+
+### 里面用了哪些 FreeRTOS 机制？
+
+对照我们前面讲的，来看看实际项目中用到了什么：
+
+| 机制 | 代码 | 对应前面哪节 |
+|------|------|-------------|
+| **任务创建** | `xTaskCreatePinnedToCore(task, TAG, stack, NULL, 5, NULL, core)` | 3.1 任务 |
+| **优先级** | 三个任务都是优先级 `5` | 3.2 优先级 |
+| **队列通信** | `xQueueCreate(2, sizeof(...))` + `xQueueSend` / `xQueueReceive` | 3.6 队列 |
+| **Blocked 等待** | `xQueueReceive(..., portMAX_DELAY)` —— 没数据时自动阻塞 | 3.4 Blocked |
+| **任务解耦** | 每个模块只关心自己的队列，互不干扰 | 3.7 设计哲学 |
+
+> 🎯 注意看：没有 `delay_ms` 空转，没有大 while 里塞一堆函数。每个任务等自己的队列，有数据就处理，没数据就 Blocked 让出 CPU —— 正是我们全文在说的**多任务思想**。
+
+### 每个模块在做什么
+
+#### 📷 Camera 模块（`camera_setting.c`）—— 拍照工
+
+这个模块负责初始化摄像头 + 循环拍照。
+
+```c
+// 任务主循环 —— 拍到地老天荒
+static void task_process_handler(void *arg) {
+    while (true) {
+        camera_fb_t *frame = esp_camera_fb_get();    // 拍照！返回一帧图像
+        if (frame) {
+            xQueueSend(xQueueFrameO, &frame, portMAX_DELAY);  // 丢进队列
+        }
+    }
+}
+```
+
+拍照本身是硬件在干，`esp_camera_fb_get()` 本质是等硬件通知"拍好了"，然后取走缓冲区指针。**整个任务就两件事：拍 → 发**。
+
+
+#### 🎨 Color Detection 模块（`color_detection.cpp`）—— 识别工
+
+从队列拿到帧后，做的核心是**颜色识别**：
+
+```c
+// 颜色阈值配置（HSV 范围 + 面积阈值 + 名称）
+vector<color_info_t> std_color_info = {
+    { {0, 20, 80, 255, 60, 255}, 64, "red"},    // H:0~20, S:80~255, V:60~255
+    {{38, 92, 50, 255, 40, 255}, 64, "green"},  // H:38~92
+    {{95, 125, 60, 255, 60, 255}, 64, "blue"},   // H:95~125
+    {{130, 165, 60, 255, 60, 255}, 64, "purple"} // H:130~165
+};
+```
+
+任务主循环做了 4 件事，我们一步一步看：
+
+
+##### Step 1 — 等帧
+
+```c
+xQueueReceive(xQueueFrameI, &frame, portMAX_DELAY);
+```
+
+任务启动后第一件事：**等。** `portMAX_DELAY` 表示等到地老天荒——没帧来就老实 Blocked 着，让出 CPU。
+
+##### Step 2 — 图像分割
+
+```c
+static const size_t segmentHeight = 40;   // 120 ÷ 3 = 40
+static uint16_t segment1[160 * 40];       // 上段缓冲区
+static uint16_t segment2[160 * 40];       // 中段缓冲区
+
+splitImageIntoThreeSegments(frame->buf, frame->width, frame->height,
+                            segment1, segment2);
+```
+
+```
+┌─────────────────┐
+│   segment1      │  ← 上 1/3（远处）
+├─────────────────┤
+│   segment2      │  ← 中 1/3（近处）
+├─────────────────┤
+│   （丢弃）      │  ← 下 1/3（车头正下方，不管）
+└─────────────────┘
+```
+
+> 下 1/3 是车头正下方的地面，看到了也来不及转弯，估计例程为了省算力所以pass掉了。函数名叫 `ThreeSegments` 但只用了俩——可能是早期原型遗留，我过几周有空了准备加上去，以后做全图颜色识别的时候有用
+
+##### Step 3 — 颜色检测
+
+```c
+auto &results1 = detector.detect(segment1, {30, 160, 3});
+auto &results2 = detector.detect(segment2, {30, 160, 3});
+```
+
+`detector.detect()` 内部做了 3 件事：
+1. 遍历每个像素，判断 RGB 是否落在颜色阈值内
+2. 标记同一颜色的连通区域（连通域分析）
+3. 返回每种颜色的所有色块列表（位置 + 面积）
+
+颜色阈值表（HSV 空间）：
+
+| 颜色 | H 范围 | S 范围 | V 范围 | 最小面积 |
+|------|--------|--------|--------|---------|
+| 🔴 Red | 0~20 | 80~255 | 60~255 | 64 px² |
+| 🟢 Green | 38~92 | 50~255 | 40~255 | 64 px² |
+| 🔵 Blue | 95~125 | 60~255 | 60~255 | 64 px² |
+| 🟣 Purple | 130~165 | 60~255 | 60~255 | 64 px² |
+
+##### Step 4 — 提取最大色块
+
+```c
+for (int i = 0; i < 4; ++i) {
+    get_color_detection_result(results1[i], draw_colors[i],
+                               block_segment.segment1);
+    // 没检测到 → 数据归零（防下位机误判）
+    if (results1[i].size() == 0)
+        memset(&block_segment.segment1[i], 0, sizeof(color_data_t));
+}
+```
+
+`get_color_detection_result` 遍历该颜色的所有检测结果，记录**面积最大**的那个，提取中心坐标 `(center_x, center_y)` 和边框 `(width, length)`。
+
+没检测到就归零——不然下位机拿到的是上一帧的旧数据，小车会乱跑。
+
+> 这里也有的改, 准备改成 记录多个出现过的检测结果, 而不是单个面积最大的, 我觉得这个可以用来障碍物识别和路径规划.
+
+##### Step 5 — 发结果
+
+```c
+xQueueSend(xQueueResult, &block_segment, portMAX_DELAY);
+vTaskDelay(1);
+```
+
+下位机（STM32）通过 I2C 就能拿到画面上段/中段里各色块的位置，根据色块偏左还是偏右决定转向。
+
+> ⚡ 整条流水线没有一句 `delay_ms` 空转。每个任务都在等队列——这就是 RTOS 多任务思想最直观的体现。
+
+#### 🔌 I2C Send 模块（`iic_data_send.cpp`）—— 通信工
+
+这个模块做的是**I2C 从机**——它不主动发数据，而是等主控（STM32）来要。
+
+##### 任务在做什么？
+
+```c
+static void task_process_handler(void *arg) {
+    Wire.begin(0x52, 47, 48, 100000);   // SDA=47, SCL=48, 100kHz
+    Wire.onReceive(iic_receive);
+    Wire.onRequest(iic_request);
+
+    while (true) {
+        // 从队列拿最新的颜色数据（Blocked 等待）
+        xQueueReceive(xQueueResultI, &send_color_data, portMAX_DELAY);
+    }
+}
+```
+
+这个任务的 `while(true)` 里只有一件事：**从队列拿数据**。拿到后更新到全局变量 `send_color_data`，I2C 回调函数里直接读这个变量来响应主机。
+那么什么是回调函数呢? 跟中断服务函数（ISR）有什么区别？
+
+**中断服务函数（ISR）** —— 硬件级别的：
+- CPU 发现 I2C 硬件来了信号 → 暂停当前任务 → **自动跳转到 ISR 地址**
+- ISR 的地址写在**中断向量表**里，芯片出厂就定好了
+- 执行完 → CPU 自动恢复之前的任务
+- 必须短、快、不能调用大部分 FreeRTOS API（要用 `FromISR` 版本）
+
+**回调函数** —— 软件级别的：
+- 你写了一个函数，**注册**到某个库（比如 `Wire.onReceive(my_func)`）
+- 库在合适的时机帮你调用它
+- 至于是不是中断里跑的，看库的实现
+
+**在这个项目里，它们的关系是：**
+
+```
+I2C 硬件中断触发
+    → CPU 跳转到 I2C ISR（内核/库写的，你看不到）
+        → ISR 里检查是收还是发
+            → 调用你注册的回调函数：iic_receive / iic_request
+                → 你的代码在这里跑
+```
+
+所以 `iic_receive` 和 `iic_request` 是**回调函数**，但它们在**中断上下文**里执行。只不过库帮你封装了一层，你不用直接写 ISR 了。
+
+> 🎯 **一句话区分：** ISR 是"硬件知道你叫啥"（在向量表里），callback 是"库知道你的地址"（你注册给库的）。这里的回调本质上是 ISR 的一部分，只是库帮你隔了一层。
+
+🤔 等等，你可能会问：**ISR 不是应该短快吗？套一层回调函数不就更慢了？**
+
+好问题！但这里的关键是——套回调**没增加额外耗时**，因为回调里本身就啥也没干：
+
+```c
+// 整个回调就做了这一件事：读一个字节存到变量里
+static void iic_receive(int len) {
+    rec = Wire.read();   // 读 I2C 数据寄存器 → 一条指令
+}
+
+// 另一个回调也只是：读内存 → 写 I2C 数据寄存器
+static void iic_request() {
+    send_data[0] = send_color_data.segment1[0].center_x;  // 读内存
+    Wire.slaveWrite(send_data, 4);                         // 写寄存器
+}
+```
+
+**真正的耗时工作（颜色检测、图像分割）在哪里？** 在 `color_detection` 的 **FreeRTOS 任务**里，不在回调里。回调只管**搬运几个字节**，微秒级就完事了。
+
+这就是嵌入式里常见的 **"中断做一半，任务做一半"** 模式：
+
+| 层级 | 做什么 | 耗时 |
+|------|--------|------|
+| I2C 回调（中断级） | 读/写 I2C 寄存器，搬几个字节 | ⚡ 微秒 |
+| FreeRTOS 任务（任务级） | 颜色检测、图像分割 | 🐢 毫秒 |
+
+回调只是中断和任务之间的**传话人**，传完话就撤了。重活累活丢给任务去干。
+
+> 💡 如果非要在回调里做颜色检测，那才是真违背 ISR 的初衷。但这里的设计没这个问题——回调只做 IO，不做计算。
+
+##### 两个回调函数
+
+任务初始化时注册了两个 I2C 回调，**它们不是任务自己调用的，而是 I2C 硬件中断触发时自动执行**：
+
+```c
+Wire.onReceive(iic_receive);   // 主机发送数据类别指令 → 中断里执行
+Wire.onRequest(iic_request);   // 主机发送读取数据指令 → 中断里执行
+```
+
+**`iic_receive` —— 收命令：**
+
+```c
+static uint8_t rec = 0xFF;
+
+static void iic_receive(int len) {
+    while (Wire.available()) {
+        rec = Wire.read();   // 读一个字节（命令码 0xA0~0xA7）
+    }
+}
+```
+
+主机（STM32）先发一个字节过来，`iic_receive` 读到后存到 `rec` 里。就这么简单——它只记下"主机想要哪个数据"。
+
+**`iic_request` —— 发数据：**
+
+```c
+static uint8_t send_data[4] = {0};
+
+static void iic_request() {
+    switch (rec) {
+        case 0xA0:  // 红色 · 段1: center_x, center_y, width, length
+            send_data[0] = send_color_data.segment1[0].center_x;
+            send_data[1] = send_color_data.segment1[0].center_y;
+            send_data[2] = send_color_data.segment1[0].width;
+            send_data[3] = send_color_data.segment1[0].length;
+            break;
+        case 0xA1:  // 红色 · 段2
+            send_data[0] = send_color_data.segment2[0].center_x;
+            // ...
+            break;
+        // case 0xA2~0xA3: 绿色 段1/段2
+        // case 0xA4~0xA5: 蓝色 段1/段2
+        // case 0xA6~0xA7: 紫色 段1/段2
+    }
+    Wire.slaveWrite(send_data, sizeof(send_data));  // 打包发回 4 字节
+}
+```
+
+命令码对应关系：
+
+| 命令 | 颜色 | 区域 | 返回数据 |
+|------|------|------|---------|
+| `0xA0` | 🔴 Red | 段1（远处） | 4字节: center_x, center_y, width, length |
+| `0xA1` | 🔴 Red | 段2（近处） | 同上 |
+| `0xA2` | 🟢 Green | 段1 | 同上 |
+| `0xA3` | 🟢 Green | 段2 | 同上 |
+| `0xA4` | 🔵 Blue | 段1 | 同上 |
+| `0xA5` | 🔵 Blue | 段2 | 同上 |
+| `0xA6` | 🟣 Purple | 段1 | 同上 |
+| `0xA7` | 🟣 Purple | 段2 | 同上 |
+
+> **实际效果：** STM32 每帧轮询 8 次 I2C（4 颜色 × 2 段），拿到色块位置后就知道小车该往哪转——这就是"颜色寻线"的原理。
+
+#### 双核调度 —— FreeRTOS 支持多核
+
+```c
+xTaskCreatePinnedToCore(task_camera, TAG, 3*1024, NULL, 5, NULL, 1);  // core 1
+xTaskCreatePinnedToCore(task_color,  TAG, 4*1024, NULL, 5, NULL, 0);  // core 0
+xTaskCreatePinnedToCore(task_i2c,    TAG, 5*1024, NULL, 5, NULL, 0);  // core 0
+```
+
+- Core 1 只跑摄像头采集（高频率拍照）
+- Core 0 跑颜色处理 + I2C 通信
+- 两个核**并行工作**，互不干扰
+
+> 这是 ESP32 双核单片机的优势。
+
+---
+
 ## 写在最后
 
 如果你以前只写过裸机程序，面对多模块解耦时的棘手情况, 你可能只会函数多多益善, 但了解完FreeRTOS, 我们就可以通过多任务调度的思想, 达到更实时, 更解耦的效果, 
-加一层是对的, 有没有懂得()
+加一层是对的()
 
 当然，裸机在某些简单场景下更直接、更可控。~~ RTOS 的调试比裸机痛苦多了 😇~~
 
