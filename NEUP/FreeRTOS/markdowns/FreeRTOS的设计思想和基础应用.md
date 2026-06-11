@@ -50,7 +50,6 @@
     - [5.3 vTaskStartScheduler() 之后的世界](#53-vtaskstartscheduler-之后的世界)
   - [6. 应用 Demo：ESP32-S3 颜色巡线](#6-应用-demoesp32-s3-颜色巡线)
     - [项目结构](#项目结构)
-    - [里面用了哪些 FreeRTOS 机制？](#里面用了哪些-freertos-机制)
     - [每个模块在做什么](#每个模块在做什么)
       - [📷 Camera 模块（`camera_setting.c`）—— 拍照工](#-camera-模块camera_settingc-拍照工)
       - [🎨 Color Detection 模块（`color_detection.cpp`）—— 识别工](#-color-detection-模块color_detectioncpp-识别工)
@@ -63,7 +62,9 @@
         - [任务在做什么？](#任务在做什么)
         - [两个回调函数](#两个回调函数)
       - [双核调度 —— FreeRTOS 支持多核](#双核调度--freertos-支持多核)
-  - [写在最后](#写在最后)
+    - [里面用了哪些 FreeRTOS 机制？](#里面用了哪些-freertos-机制)
+    - [未来规划](#未来规划)
+  - [在清明期间, 在群里和大家谈及, 我想着做一个`旋翼飞行器 + 视觉传感`实现定点投掷 的项目, 目前看来还存在: 摄像头精度不足, 返航易迷失, 负载能力弱等等的问题. 我争取在暑假也攻克一些, 暑假也准备学习些 harness 的文件内部结构和框架, 以及操作系统的内核设计知识.](#在清明期间-在群里和大家谈及-我想着做一个旋翼飞行器--视觉传感实现定点投掷-的项目-目前看来还存在-摄像头精度不足-返航易迷失-负载能力弱等等的问题-我争取在暑假也攻克一些-暑假也准备学习些-harness-的文件内部结构和框架-以及操作系统的内核设计知识)
   - [写在最后](#写在最后)
 
 ---
@@ -592,7 +593,7 @@ xTaskCreate(task_func, "Task", 128, arg, 1, &handle);
 
 ### 值得讲的点
 
-- **学 FreeRTOS 的最大价值**不是学会怎么调 API（那玩意儿查手册就行），而是理解 **"多任务是怎么协作的"**——这个能力放之四海而皆准。
+- **学 FreeRTOS 的最大价值**不是学会如何调 API，而是理解 **"多任务协作"的思维**。
 - 反过来学：如果你已经学过操作系统的多线程，你会发现 FreeRTOS 的这些概念**异常熟悉**。它就是操作系统的一个**极简实现**，反而因为没有 MMU、没有用户态这些"噪声"，**让你更看清多任务调度的本质**。
 
 
@@ -665,6 +666,7 @@ main()
 
 理论说了这么多，来看看一个真实的项目——**ESP32-S3 颜色巡线**：
 ~（整体的框架我是直接搬的官方给的例程，但这个例程内部好像有挺多毛病的，比如颜色阈值不对，漏分析区域等等，还有挺多还待发现，改了一些，还有些还没改）~
+研究了三个例程，这里讲一个作为示例
 
 ### 项目结构
 
@@ -694,19 +696,6 @@ void setup() {
 | 🎨 Color Detection | `color_detection.cpp` | 从队列取帧，做颜色识别，结果发到下一个队列 | `xQueueIICData` |
 | 🔌 I2C Send | `iic_data_send.cpp` | 从队列取颜色数据，通过 I2C 发给下位机 | — |
 
-### 里面用了哪些 FreeRTOS 机制？
-
-对照我们前面讲的，来看看实际项目中用到了什么：
-
-| 机制 | 代码 | 对应前面哪节 |
-|------|------|-------------|
-| **任务创建** | `xTaskCreatePinnedToCore(task, TAG, stack, NULL, 5, NULL, core)` | 3.1 任务 |
-| **优先级** | 三个任务都是优先级 `5` | 3.2 优先级 |
-| **队列通信** | `xQueueCreate(2, sizeof(...))` + `xQueueSend` / `xQueueReceive` | 3.6 队列 |
-| **Blocked 等待** | `xQueueReceive(..., portMAX_DELAY)` —— 没数据时自动阻塞 | 3.4 Blocked |
-| **任务解耦** | 每个模块只关心自己的队列，互不干扰 | 3.7 设计哲学 |
-
-> 🎯 注意看：没有 `delay_ms` 空转，没有大 while 里塞一堆函数。每个任务等自己的队列，有数据就处理，没数据就 Blocked 让出 CPU —— 正是我们全文在说的**多任务思想**。
 
 ### 每个模块在做什么
 
@@ -784,7 +773,7 @@ auto &results1 = detector.detect(segment1, {30, 160, 3});
 auto &results2 = detector.detect(segment2, {30, 160, 3});
 ```
 
-`detector.detect()` 内部做了 3 件事：
+`detector.detect()`（内部利用深度学习，在dl库里） 内部做了 3 件事：
 1. 遍历每个像素，判断 RGB 是否落在颜色阈值内
 2. 标记同一颜色的连通区域（连通域分析）
 3. 返回每种颜色的所有色块列表（位置 + 面积）
@@ -847,6 +836,15 @@ static void task_process_handler(void *arg) {
 ```
 
 这个任务的 `while(true)` 里只有一件事：**从队列拿数据**。拿到后更新到全局变量 `send_color_data`，I2C 回调函数里直接读这个变量来响应主机。
+
+##### 两个回调函数
+任务初始化时注册了两个 I2C 回调，**它们不由该任务调用执行，由其他任务在条件满足时成立**：
+
+```c
+Wire.onReceive(iic_receive);   // 主机发送数据类别指令 → 中断里执行
+Wire.onRequest(iic_request);   // 主机发送读取数据指令 → 中断里执行
+```
+
 那么什么是回调函数呢? 跟中断服务函数（ISR）有什么区别？
 
 **中断服务函数（ISR）** —— 硬件级别的：
@@ -857,115 +855,22 @@ static void task_process_handler(void *arg) {
 
 **回调函数** —— 软件级别的：
 - 你写了一个函数，**注册**到某个库（比如 `Wire.onReceive(my_func)`）
+    > 其实就是传函数指针
 - 库在合适的时机帮你调用它
-- 至于是不是中断里跑的，看库的实现
+- 可以在中断里跑,也可以不是，看库的具体实现
 
 **在这个项目里，它们的关系是：**
 
 ```
 I2C 硬件中断触发
     → CPU 跳转到 I2C ISR（内核/库写的，你看不到）
-        → ISR 里检查是收还是发
-            → 调用你注册的回调函数：iic_receive / iic_request
-                → 你的代码在这里跑
+        → ISR 里检查中断状态寄存器
+            → 发送相应事件结构体到队列
+                → 事件任务从blocked👉ready👉run
+                    → 调用你注册的回调函数：iic_receive / iic_request
 ```
 
-所以 `iic_receive` 和 `iic_request` 是**回调函数**，但它们在**中断上下文**里执行。只不过库帮你封装了一层，你不用直接写 ISR 了。
-
-> 🎯 **一句话区分：** ISR 是"硬件知道你叫啥"（在向量表里），callback 是"库知道你的地址"（你注册给库的）。这里的回调本质上是 ISR 的一部分，只是库帮你隔了一层。
-
-🤔 等等，你可能会问：**ISR 不是应该短快吗？套一层回调函数不就更慢了？**
-
-好问题！但这里的关键是——套回调**没增加额外耗时**，因为回调里本身就啥也没干：
-
-```c
-// 整个回调就做了这一件事：读一个字节存到变量里
-static void iic_receive(int len) {
-    rec = Wire.read();   // 读 I2C 数据寄存器 → 一条指令
-}
-
-// 另一个回调也只是：读内存 → 写 I2C 数据寄存器
-static void iic_request() {
-    send_data[0] = send_color_data.segment1[0].center_x;  // 读内存
-    Wire.slaveWrite(send_data, 4);                         // 写寄存器
-}
-```
-
-**真正的耗时工作（颜色检测、图像分割）在哪里？** 在 `color_detection` 的 **FreeRTOS 任务**里，不在回调里。回调只管**搬运几个字节**，微秒级就完事了。
-
-这就是嵌入式里常见的 **"中断做一半，任务做一半"** 模式：
-
-| 层级 | 做什么 | 耗时 |
-|------|--------|------|
-| I2C 回调（中断级） | 读/写 I2C 寄存器，搬几个字节 | ⚡ 微秒 |
-| FreeRTOS 任务（任务级） | 颜色检测、图像分割 | 🐢 毫秒 |
-
-回调只是中断和任务之间的**传话人**，传完话就撤了。重活累活丢给任务去干。
-
-> 💡 如果非要在回调里做颜色检测，那才是真违背 ISR 的初衷。但这里的设计没这个问题——回调只做 IO，不做计算。
-
-##### 两个回调函数
-
-任务初始化时注册了两个 I2C 回调，**它们不是任务自己调用的，而是 I2C 硬件中断触发时自动执行**：
-
-```c
-Wire.onReceive(iic_receive);   // 主机发送数据类别指令 → 中断里执行
-Wire.onRequest(iic_request);   // 主机发送读取数据指令 → 中断里执行
-```
-
-**`iic_receive` —— 收命令：**
-
-```c
-static uint8_t rec = 0xFF;
-
-static void iic_receive(int len) {
-    while (Wire.available()) {
-        rec = Wire.read();   // 读一个字节（命令码 0xA0~0xA7）
-    }
-}
-```
-
-主机（STM32）先发一个字节过来，`iic_receive` 读到后存到 `rec` 里。就这么简单——它只记下"主机想要哪个数据"。
-
-**`iic_request` —— 发数据：**
-
-```c
-static uint8_t send_data[4] = {0};
-
-static void iic_request() {
-    switch (rec) {
-        case 0xA0:  // 红色 · 段1: center_x, center_y, width, length
-            send_data[0] = send_color_data.segment1[0].center_x;
-            send_data[1] = send_color_data.segment1[0].center_y;
-            send_data[2] = send_color_data.segment1[0].width;
-            send_data[3] = send_color_data.segment1[0].length;
-            break;
-        case 0xA1:  // 红色 · 段2
-            send_data[0] = send_color_data.segment2[0].center_x;
-            // ...
-            break;
-        // case 0xA2~0xA3: 绿色 段1/段2
-        // case 0xA4~0xA5: 蓝色 段1/段2
-        // case 0xA6~0xA7: 紫色 段1/段2
-    }
-    Wire.slaveWrite(send_data, sizeof(send_data));  // 打包发回 4 字节
-}
-```
-
-命令码对应关系：
-
-| 命令 | 颜色 | 区域 | 返回数据 |
-|------|------|------|---------|
-| `0xA0` | 🔴 Red | 段1（远处） | 4字节: center_x, center_y, width, length |
-| `0xA1` | 🔴 Red | 段2（近处） | 同上 |
-| `0xA2` | 🟢 Green | 段1 | 同上 |
-| `0xA3` | 🟢 Green | 段2 | 同上 |
-| `0xA4` | 🔵 Blue | 段1 | 同上 |
-| `0xA5` | 🔵 Blue | 段2 | 同上 |
-| `0xA6` | 🟣 Purple | 段1 | 同上 |
-| `0xA7` | 🟣 Purple | 段2 | 同上 |
-
-> **实际效果：** STM32 每帧轮询 8 次 I2C（4 颜色 × 2 段），拿到色块位置后就知道小车该往哪转——这就是"颜色寻线"的原理。
+这就是嵌入式里常见的 **"中断做一半，任务做一半"** 模式.
 
 #### 双核调度 —— FreeRTOS 支持多核
 
@@ -983,6 +888,24 @@ xTaskCreatePinnedToCore(task_i2c,    TAG, 5*1024, NULL, 5, NULL, 0);  // core 0
 
 ---
 
+### 里面用了哪些 FreeRTOS 机制？
+
+对照我们前面讲的，来看看实际项目中用到了什么：
+
+| 机制 | 代码 | 对应前面哪节 |
+|------|------|-------------|
+| **任务创建** | `xTaskCreatePinnedToCore(task, TAG, stack, NULL, 5, NULL, core)` | 3.1 任务 |
+| **优先级** | 三个任务都是优先级 `5` | 3.2 优先级 |
+| **队列通信** | `xQueueCreate(2, sizeof(...))` + `xQueueSend` / `xQueueReceive` | 3.6 队列 |
+| **Blocked 等待** | `xQueueReceive(..., portMAX_DELAY)` —— 没数据时自动阻塞 | 3.4 Blocked |
+| **任务解耦** | 每个模块只关心自己的队列，互不干扰 | 3.7 设计哲学 |
+
+> 注：没有 `delay_ms` 空转，没有大 while 里塞一堆函数。每个任务等自己的队列，有数据就处理，没数据就 Blocked 让出 CPU —— 正是我们全文在说的**多任务思想**。
+
+### 未来规划
+我这一个月花时间了解了FreeRTOS的基本机制和芯片方给的三个例程, 本来雄心壮志想在最后的项目展示上整个大活的, 后面发现没来的及整, 我暑假会继续将这个小demo优化, 应该能在7-8月期间完成 `STM32主控小车 +ESP32视觉传感`, 实现基础的颜色巡线功能,到时候将项目打包到github上(话说我最好先研究一下怎么把STM32项目从keil_v5移植到vsc的STM32CubeIDE上)
+在清明期间, 在群里和大家谈及, 我想着做一个`旋翼飞行器 + 视觉传感`实现定点投掷 的项目, 目前看来还存在: 摄像头精度不足, 返航易迷失, 负载能力弱等等的问题. 我争取在暑假也攻克一些, 暑假也准备学习些 harness 的文件内部结构和框架, 以及操作系统的内核设计知识.   
+---
 ## 写在最后
 
 如果你以前只写过裸机程序，面对多模块解耦时的棘手情况, 你可能只会函数多多益善, 但了解完FreeRTOS, 我们就可以通过多任务调度的思想, 达到更实时, 更解耦的效果, 
@@ -990,7 +913,7 @@ xTaskCreatePinnedToCore(task_i2c,    TAG, 5*1024, NULL, 5, NULL, 0);  // core 0
 
 当然，裸机在某些简单场景下更直接、更可控。~~ RTOS 的调试比裸机痛苦多了 😇~~
 
-但当你面对一个功能越来越多、实时性要求越来越高的项目时，FreeRTOS 会是你最好的帮手之一。
+但当面对一个功能越来越多、实时性要求越来越高的项目时，FreeRTOS 会是你最好的帮手之一。
 
 ---
 
