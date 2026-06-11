@@ -1,1 +1,5 @@
 .obsidian/
+
+# 保护目录 —— 独立子仓库，不进远程
+.claude/
+note-taking_copilot/
